@@ -20,6 +20,8 @@ import subprocess
 import os
 import sys
 
+mariadbd="/usr/sbin/mariadbd"
+
 class Allocation(object):
     def __init__(self, stack, size):
         self.stack = stack
@@ -173,6 +175,8 @@ struct combined_alloc_info_t {
 #define ALIGNED_ALLOC 9
 #define FREE 10
 #define MUNMAP 11
+#define MY_MALLOC 12
+#define MY_FREE 13
 
 BPF_HASH(sizes, u64, u64);
 BPF_HASH(allocs, u64, struct alloc_info_t, 1000000);
@@ -224,7 +228,7 @@ static inline int gen_alloc_enter(struct pt_regs *ctx, size_t size, u32 type_ind
         sizes.update(&key, &size64);
 
         if (SHOULD_PRINT)
-                bpf_trace_printk("alloc entered, size = %u\\n", size);
+                bpf_trace_printk("alloc(%u) entered, size = %u\\n", (u64) type_index, size);
         return 0;
 }
 
@@ -248,8 +252,8 @@ static inline int gen_alloc_exit2(struct pt_regs *ctx, u64 address, u32 type_ind
         }
 
         if (SHOULD_PRINT) {
-                bpf_trace_printk("alloc exited, size = %lu, result = %lx\\n",
-                                 info.size, address);
+                bpf_trace_printk("alloc(%u) exited, size = %lu, result = %lx\\n",
+                                 (u64) type_index, info.size, address);
         }
         return 0;
 }
@@ -283,6 +287,18 @@ int malloc_exit(struct pt_regs *ctx) {
 }
 
 int free_enter(struct pt_regs *ctx, void *address) {
+        return gen_free_enter(ctx, address);
+}
+
+int my_malloc_enter(struct pt_regs *ctx, unsigned int key, size_t size, unsigned long flags) {
+        return gen_alloc_enter(ctx, size, MY_MALLOC);
+}
+
+int my_malloc_exit(struct pt_regs *ctx) {
+        return gen_alloc_exit2(ctx, PT_REGS_RC(ctx), MY_MALLOC);
+}
+
+int my_free_enter(struct pt_regs *ctx, void *address) {
         return gen_free_enter(ctx, address);
 }
 
@@ -478,7 +494,7 @@ bpf = BPF(text=bpf_source)
 if not kernel_trace:
         print("Attaching to pid %d, Ctrl+C to quit." % pid)
 
-        def attach_probes(sym, fn_prefix=None, can_fail=False, need_uretprobe=True):
+        def attach_probes(sym, fn_prefix=None, can_fail=False, need_uretprobe=True, obj=obj):
                 if fn_prefix is None:
                         fn_prefix = sym
                 if args.symbols_prefix is not None:
@@ -508,6 +524,8 @@ if not kernel_trace:
         attach_probes("aligned_alloc", can_fail=True)  # added in C11
         attach_probes("free", need_uretprobe=False)
         attach_probes("munmap", can_fail=True, need_uretprobe=False) # failed on jemalloc
+        attach_probes("my_malloc", obj=mariadbd)
+        attach_probes("my_free", obj=mariadbd, need_uretprobe=False)
 
 else:
         print("Attaching to kernel allocators, Ctrl+C to quit.")
